@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from transformers import Qwen2Tokenizer
 
 from comfy import sd1_clip
+import comfy.model_management
 import comfy.text_encoders.qwen_vl
 from .qwen35 import Qwen35VisionModel
 from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_4BConfig, Qwen3VL_8BConfig, Qwen3VL_32BConfig
@@ -20,6 +21,22 @@ QWEN3VL_VISION_COMMON = dict(num_heads=16, patch_size=16, temporal_patch_size=2,
                              spatial_merge_size=2, num_position_embeddings=2304)
 
 QWEN3VL_CONFIGS = {"qwen3vl_4b": Qwen3VL_4BConfig, "qwen3vl_8b": Qwen3VL_8BConfig, "qwen3vl_32b": Qwen3VL_32BConfig}
+
+
+def _cast_floats(value, dtype):
+    if torch.is_tensor(value):
+        return value.to(dtype) if value.is_floating_point() else value
+    if isinstance(value, (list, tuple)):
+        return type(value)(_cast_floats(v, dtype) for v in value)
+    return value
+
+
+def _all_finite(value):
+    if torch.is_tensor(value):
+        return not value.is_floating_point() or bool(torch.isfinite(value).all())
+    if isinstance(value, (list, tuple)):
+        return all(_all_finite(v) for v in value)
+    return True
 
 
 class Qwen3VLDeepstackMerger(nn.Module):
@@ -97,20 +114,32 @@ class Qwen3VL(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
         deepstack_embeds = kwargs.pop("deepstack_embeds", None)
         if embeds is not None and position_ids is None:
             position_ids, visual_pos_masks, deepstack_embeds = self.build_image_inputs(embeds, embeds_info)
-        return self.model(
-            input_ids,
-            attention_mask=attention_mask,
-            embeds=embeds,
-            num_tokens=num_tokens,
-            intermediate_output=intermediate_output,
-            final_layer_norm_intermediate=final_layer_norm_intermediate,
-            dtype=dtype,
-            position_ids=position_ids,
-            embeds_info=embeds_info,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_embeds=deepstack_embeds,
-            **kwargs,
-        )
+
+        def run(compute_dtype):
+            return self.model(
+                input_ids,
+                attention_mask=attention_mask,
+                embeds=_cast_floats(embeds, compute_dtype),
+                num_tokens=num_tokens,
+                intermediate_output=intermediate_output,
+                final_layer_norm_intermediate=final_layer_norm_intermediate,
+                dtype=compute_dtype,
+                position_ids=position_ids,
+                embeds_info=embeds_info,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_embeds=_cast_floats(deepstack_embeds, compute_dtype),
+                **kwargs,
+            )
+
+        # sd1_clip はテキストエンコーダを常に float32 で呼ぶ。RDNA3.5 などの AMD は fp32 の行列積が遅く
+        # （Radeon 8060S で実効 1.7 TFLOPS、1057 トークンで約 8 秒）、言語モデル部だけ fp16 で計算する。
+        # fp32 との差は cosine 0.99998。bf16 は誤差が大きい（cosine 0.997）ので使わない。
+        # fp16 で溢れて非有限値が出たときは fp32 で計算し直す。
+        if dtype == torch.float32 and comfy.model_management.is_amd():
+            out = run(torch.float16)
+            if _all_finite(out):
+                return _cast_floats(out, torch.float32)
+        return run(dtype)
 
 
 def _make_qwen3vl_model(model_type):

@@ -468,8 +468,12 @@ class Qwen35VisionPatchEmbed(nn.Module):
         self.proj = ops.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True, device=device, dtype=dtype)
 
     def forward(self, x):
-        x = x.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
-        return self.proj(x).view(-1, self.embed_dim)
+        # kernel_size == stride の Conv3d は「パッチを切り出して線形変換」と同じ計算なので、行列積で求める。
+        # AMD では ComfyUI が MIOpen を無効化するため Conv3d が汎用の遅い経路に落ち、
+        # 参照画像 1 枚で約 15 秒かかっていた（Radeon 8060S 実測。行列積なら 1ms 未満、出力の差は丸め誤差のみ）。
+        x = x.reshape(-1, self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size)
+        with comfy.ops.CastBiasWeightContext(self.proj, x, offloadable=True) as (weight, bias):
+            return F.linear(x, weight.reshape(self.embed_dim, -1), bias)
 
 
 class Qwen35VisionMLP(nn.Module):
