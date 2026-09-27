@@ -319,7 +319,9 @@ def lscm_charts_batch(
         np.put_along_axis(cval, pin_cols, pin_vals, axis=1)
 
         # normal equations + batched solve; the fp64 dense algebra goes to the GPU when available
-        use_gpu = device is not None and device.type == "cuda"
+        # ROCm では fp64 の batched solve（hipblasDgetrfBatched）が HIPBLAS_STATUS_ALLOC_FAILED で落ちるので、
+        # 下の numpy の経路で解く（Radeon 8060S / gfx1151 / ROCm 7.2 で実測。1 チャンクの A は 96MB までなのでメモリ不足ではない）。
+        use_gpu = device is not None and device.type == "cuda" and torch.version.hip is None
         if use_gpu:
             A_t = torch.from_numpy(A).to(device)
             At = A_t.transpose(1, 2)
