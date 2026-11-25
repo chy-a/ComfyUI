@@ -256,6 +256,17 @@ QUANT_ALGOS["asym_w4a8_int8"] = {
     "quantize_input": False,
 }
 
+# Same layout class and kernels, 6-bit uniform codes: weight is int8 [N, 3K/4], no codebook.
+QUANT_ALGOS["w6a8_int8"] = {
+    "storage_t": torch.int8,
+    "parameters": {"weight_scale"},
+    "comfy_tensor_layout": "AsymW4A8Int8Layout",
+    "quantize_input": False,
+}
+# 3-bit (8-entry codebook, 3K/8-byte rows) and 5-bit (uniform, 5K/8-byte rows) widths of the same layout
+for _fmt in ("w3a8_int8", "w5a8_int8"):
+    QUANT_ALGOS[_fmt] = dict(QUANT_ALGOS["w6a8_int8"])
+
 
 # ==============================================================================
 # Re-exports for backward compatibility
